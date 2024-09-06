@@ -1,0 +1,63 @@
+---
+- hosts: app
+  become: yes
+  tasks:
+    - name: Download Docker and installation script
+      shell: curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh
+      args:
+        removes: ./get-docker.sh
+
+    - name: Ensure Docker is started and enabled
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+- hosts: database
+  connection: local
+  become: yes
+  gather_facts: yes
+  vars:
+    pg_version: "{{ postgresql_version }}"
+    pg_data_dir: "{{ postgresql_data_dir }}"
+
+  tasks:
+    - name: Install PostgreSQL
+      apt:
+        name: "postgresql-{{ pg_version }}"
+        state: present
+        update_cache: yes
+
+    - name: Stop PostgreSQL service before changing data directory
+      systemd:
+        name: postgresql
+        state: stopped
+      register: pg_service  # Записываем статус операции остановки
+
+    - name: Ensure PostgreSQL is started and enabled
+      when: pg_service is defined and pg_service.status == "inactive"
+      block:
+        - name: Make sure the PostgreSQL data directory exists
+          file:
+            path: "{{ pg_data_dir }}"
+            state: directory
+            owner: postgres
+            group: postgres
+            mode: 0700
+       
+        - name: Update PostgreSQL configuration to use new data directory
+          lineinfile:
+            path: "/etc/postgresql/{{ pg_version }}/main/postgresql.conf"
+            regexp: '^data_directory ='
+            line: "data_directory = '{{ pg_data_dir }}'"
+            state: present
+
+        - name: Copy data to new data directory
+          command: rsync -av /var/lib/postgresql/{{ pg_version }}/main/ {{ pg_data_dir }}/
+          become_user: postgres
+
+    - name: Start PostgreSQL service after changing data directory
+      systemd:
+        name: postgresql
+        state: started
+
